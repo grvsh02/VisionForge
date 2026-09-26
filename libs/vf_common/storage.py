@@ -3,6 +3,7 @@ downloads are streamed to disk in fixed-size chunks."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -18,6 +19,8 @@ from vf_common.config import Settings
 log = logging.getLogger(__name__)
 
 CHUNK = 1024 * 1024
+PARTS_IN_FLIGHT = 3  # per upload: parts sent to S3 while the next one is still being received
+PART_SLOTS = 4  # per process: parts in flight across all uploads, so memory stays bounded
 
 
 class UploadTooLarge(Exception):
@@ -36,6 +39,7 @@ class Storage:
         self._session = aioboto3.Session()
         self._cm = None
         self.s3 = None
+        self._part_slots = asyncio.Semaphore(PART_SLOTS)
 
     async def start(self) -> "Storage":
         # Local/self-hosted S3 (SeaweedFS) sets an endpoint and static keys. On AWS both are left
@@ -48,7 +52,8 @@ class Storage:
             kwargs["aws_secret_access_key"] = self.settings.s3_secret_key
         style = "path" if self.settings.s3_endpoint else "auto"
         self._cm = self._session.client(
-            "s3", config=Config(s3={"addressing_style": style}, retries={"max_attempts": 5}), **kwargs)
+            "s3", config=Config(s3={"addressing_style": style}, retries={"max_attempts": 5},
+                               max_pool_connections=PART_SLOTS + 12), **kwargs)
         self.s3 = await self._cm.__aenter__()
         return self
 
@@ -64,7 +69,13 @@ class Storage:
 
     async def upload_stream(self, key: str, chunks: AsyncIterator[bytes], *, max_bytes: int,
                             content_type: str, tee: BinaryIO | None = None) -> int:
-        """Stream ``chunks`` into ``key``; holds at most one part in memory.
+        """Stream ``chunks`` into ``key`` as a multipart upload.
+
+        Each full part is sent to S3 in the background while the next one is received, with
+        at most PARTS_IN_FLIGHT parts per upload and PART_SLOTS per process in flight.
+        Memory is about one part per upload (being filled, or waiting for a slot) plus at most
+        PART_SLOTS parts in flight, each held roughly twice (the S3 client copies the body).
+        Measured: one 100 MB upload +47 MiB, eight at once +110 MiB.
 
         ``tee`` also receives every chunk (e.g. a temp file, so the caller can inspect the
         upload on disk without buffering it in memory or downloading it again).
@@ -73,7 +84,24 @@ class Storage:
         buf = bytearray()
         total = 0
         upload_id: str | None = None
+        in_flight: list[asyncio.Task] = []  # oldest first, so parts complete in order
         parts: list[dict] = []
+
+        async def send(body: bytes) -> None:
+            nonlocal upload_id
+            if upload_id is None:
+                resp = await self.s3.create_multipart_upload(Bucket=self.bucket, Key=key, ContentType=content_type)
+                upload_id = resp["UploadId"]
+            if len(in_flight) >= PARTS_IN_FLIGHT:
+                parts.append(await in_flight.pop(0))
+            await self._part_slots.acquire()
+            number = len(parts) + len(in_flight) + 1
+            task = asyncio.create_task(self._upload_part(key, upload_id, number, body))
+            # A done callback runs even if the task is cancelled before it starts (a finally
+            # block inside the coroutine would not), so the slot is always returned.
+            task.add_done_callback(lambda _: self._part_slots.release())
+            in_flight.append(task)
+
         try:
             async for chunk in chunks:
                 total += len(chunk)
@@ -83,22 +111,24 @@ class Storage:
                 if tee is not None:
                     tee.write(chunk)
                 if len(buf) >= part_size:
-                    if upload_id is None:
-                        resp = await self.s3.create_multipart_upload(
-                            Bucket=self.bucket, Key=key, ContentType=content_type)
-                        upload_id = resp["UploadId"]
-                    parts.append(await self._upload_part(key, upload_id, len(parts) + 1, bytes(buf)))
+                    body = bytes(buf)
                     buf.clear()
+                    await send(body)
             if upload_id is None:
                 await self.s3.put_object(Bucket=self.bucket, Key=key, Body=bytes(buf),
                                          ContentType=content_type)
             else:
                 if buf:
-                    parts.append(await self._upload_part(key, upload_id, len(parts) + 1, bytes(buf)))
+                    await send(bytes(buf))
+                while in_flight:
+                    parts.append(await in_flight.pop(0))
                 await self.s3.complete_multipart_upload(
                     Bucket=self.bucket, Key=key, UploadId=upload_id, MultipartUpload={"Parts": parts})
             return total
         except BaseException:
+            for task in in_flight:
+                task.cancel()
+            await asyncio.gather(*in_flight, return_exceptions=True)
             if upload_id is not None:
                 try:
                     await self.s3.abort_multipart_upload(Bucket=self.bucket, Key=key, UploadId=upload_id)

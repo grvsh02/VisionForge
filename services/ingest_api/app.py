@@ -131,8 +131,9 @@ async def job_result(job_id: uuid.UUID, request: Request, x_client_id: str | Non
     async with request.app.state.pool.acquire() as conn:
         rows = await repo.job_results(conn, job_id)
     return {"job_id": str(job_id), "status": job["status"], "total_pages": job["total_pages"],
-            "pages": [{"page_index": r["idx"], "state": r["state"], "source": r["source"],
-                       "low_confidence": r["low_confidence"], "result": r["final_result"]} for r in rows]}
+            "pages": [{"page_index": r["page_idx"], "state": "FAILED" if r["kind"] == "page_failed" else "COMPLETED",
+                       "source": r["result"]["source"], "low_confidence": r["result"]["low_confidence"],
+                       "result": r["result"]} for r in rows]}
 
 
 @app.get("/healthz")
