@@ -46,12 +46,14 @@ def build_header(
     total_pages: int,
     done_pages: Iterable[int],
     window_size: int = WINDOW_SIZE,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     done = set(done_pages)
     wm = watermark(done, total_pages)
     return {
         "job_id": job_id,
         "client_id": client_id,
+        "request_id": request_id,
         "seq": seq,
         "page_index": page_index,
         "total_pages": total_pages,

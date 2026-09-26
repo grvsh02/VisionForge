@@ -21,11 +21,13 @@ from pydantic import BaseModel, Field
 
 from vf_common import evaluation as ev
 from vf_common import metrics as m
+from vf_common import tracing
 from vf_common.config import get_settings
 from vf_common.models import DocNode
 
 m.setup_logging(get_settings().log_level)
 app = FastAPI(title="visionforge-eval")
+app.add_middleware(tracing.RequestIdMiddleware)
 app.mount("/metrics", make_asgi_app())
 
 

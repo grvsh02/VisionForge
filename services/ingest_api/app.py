@@ -17,6 +17,7 @@ rate and concurrent connections per IP and per X-Client-ID) lives in the nginx e
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
@@ -27,6 +28,7 @@ from prometheus_client import make_asgi_app
 
 from vf_common import metrics as m
 from vf_common import repo
+from vf_common import tracing
 from vf_common.config import get_settings
 from vf_common.db import create_pool
 from vf_common.documents import InvalidDocument, count_pages
@@ -35,6 +37,7 @@ from vf_common.storage import Storage, UploadTooLarge
 
 ACCEPTED_TYPES = {"application/pdf", "image/tiff", "image/png", "image/jpeg"}
 settings = get_settings()
+log = logging.getLogger("ingest")
 
 
 @asynccontextmanager
@@ -49,6 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="visionforge-ingest", lifespan=lifespan)
+app.add_middleware(tracing.RequestIdMiddleware)  # X-Request-ID: accepted or generated, echoed back
 app.mount("/metrics", make_asgi_app())
 
 
@@ -99,10 +103,13 @@ async def submit_job(request: Request, x_client_id: str | None = Header(None),
 
     async with pool.acquire() as conn:
         await repo.create_job(conn, job_id=job_id, client_id=client_id, content_type=ctype,
-                              object_key=object_key, size_bytes=size, total_pages=pages)
+                              object_key=object_key, size_bytes=size, total_pages=pages,
+                              request_id=tracing.request_id())
     m.UPLOADS.labels("accepted").inc()
-    return {"job_id": str(job_id), "status": "UPLOADED", "size_bytes": size, "total_pages": pages,
-            "stream_url": f"/jobs/{job_id}/stream"}
+    log.info("job accepted", extra={"fields": {"job_id": str(job_id), "client_id": client_id,
+                                               "pages": pages, "bytes": size}})
+    return {"job_id": str(job_id), "request_id": tracing.request_id(), "status": "UPLOADED", "size_bytes": size,
+            "total_pages": pages, "stream_url": f"/jobs/{job_id}/stream"}
 
 
 async def _owned_job(request: Request, job_id: uuid.UUID, client_id: str):
@@ -119,8 +126,8 @@ async def job_status(job_id: uuid.UUID, request: Request, x_client_id: str | Non
     job = await _owned_job(request, job_id, client_id)
     async with request.app.state.pool.acquire() as conn:
         counts = await repo.job_page_counts(conn, job_id)
-    return {"job_id": str(job_id), "status": job["status"], "total_pages": job["total_pages"],
-            "pages": counts, "error": job["error"], "created_at": job["created_at"].isoformat(),
+    return {"job_id": str(job_id), "request_id": job["request_id"], "status": job["status"],
+            "total_pages": job["total_pages"], "pages": counts, "error": job["error"], "created_at": job["created_at"].isoformat(),
             "completed_at": job["completed_at"].isoformat() if job["completed_at"] else None}
 
 

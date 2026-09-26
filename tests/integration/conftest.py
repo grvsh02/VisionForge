@@ -57,12 +57,12 @@ async def queues():
     await q.close()
 
 
-async def create_split_job(conn, client_id: str, pages: int) -> uuid.UUID:
+async def create_split_job(conn, client_id: str, pages: int, request_id: str | None = None) -> uuid.UUID:
     """A job already split into ``pages`` PENDING pages, each with a 'fast' outbox row."""
     await repo.ensure_client(conn, client_id)
     job_id = uuid.uuid4()
     await repo.create_job(conn, job_id=job_id, client_id=client_id, content_type="application/pdf",
-                          object_key=f"uploads/{job_id}", size_bytes=1, total_pages=pages)
+                          object_key=f"uploads/{job_id}", size_bytes=1, total_pages=pages, request_id=request_id)
     await conn.execute("UPDATE outbox_events SET sent_at = now() WHERE queue = 'split'")  # skip splitting
     assert await repo.split_done(conn, job_id, client_id, [f"pages/{job_id}/{i:04d}.pdf" for i in range(pages)])
     return job_id

@@ -29,14 +29,14 @@ async def ensure_client(conn: asyncpg.Connection, client_id: str) -> None:
 
 
 async def create_job(conn: asyncpg.Connection, *, job_id: uuid.UUID, client_id: str, content_type: str,
-                     object_key: str, size_bytes: int, total_pages: int) -> None:
+                     object_key: str, size_bytes: int, total_pages: int, request_id: str | None = None) -> None:
     """Register an uploaded document and queue it for splitting (one transaction)."""
     async with conn.transaction():
         await conn.execute(
-            "INSERT INTO jobs (id, client_id, status, content_type, object_key, size_bytes, total_pages) "
-            "VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6)",
-            job_id, client_id, content_type, object_key, size_bytes, total_pages)
-        await _outbox(conn, "split", {"job_id": str(job_id)})
+            "INSERT INTO jobs (id, client_id, status, content_type, object_key, size_bytes, total_pages, request_id) "
+            "VALUES ($1, $2, 'UPLOADED', $3, $4, $5, $6, $7)",
+            job_id, client_id, content_type, object_key, size_bytes, total_pages, request_id)
+        await _outbox(conn, "split", _with_request_id({"job_id": str(job_id)}, request_id))
 
 
 async def get_job(conn: asyncpg.Connection, job_id: uuid.UUID) -> asyncpg.Record | None:
@@ -69,11 +69,12 @@ async def _append_event(conn: asyncpg.Connection, job_id: uuid.UUID, kind: Event
     set_status = ", status = $2, completed_at = now()" if mark else ""
     job = await conn.fetchrow(
         f"UPDATE jobs SET next_seq = next_seq + 1{set_status} WHERE id = $1 "
-        "RETURNING next_seq, total_pages, client_id", *([job_id, mark] if mark else [job_id]))
+        "RETURNING next_seq, total_pages, client_id, request_id", *([job_id, mark] if mark else [job_id]))
     done = [r["idx"] for r in await conn.fetch(
         "SELECT idx FROM pages WHERE job_id = $1 AND status = ANY($2::text[])", job_id, _TERMINAL)]
     header = build_header(job_id=str(job_id), client_id=job["client_id"], seq=job["next_seq"],
-                          page_index=page_idx, total_pages=job["total_pages"], done_pages=done)
+                          page_index=page_idx, total_pages=job["total_pages"], done_pages=done,
+                          request_id=job["request_id"])
     await conn.execute(
         "INSERT INTO events (job_id, seq, kind, page_idx, envelope) VALUES ($1, $2, $3, $4, $5)",
         job_id, job["next_seq"], kind.value, page_idx, {"header": header, "payload": payload})
@@ -81,6 +82,15 @@ async def _append_event(conn: asyncpg.Connection, job_id: uuid.UUID, kind: Event
 
 
 # --- outbox --------------------------------------------------------------------------
+
+def _with_request_id(payload: dict, request_id: str | None) -> dict:
+    """Carry the ingestion's X-Request-ID in the message (jobs from before it existed have none)."""
+    return {**payload, "request_id": request_id} if request_id else payload
+
+
+def _page_message(page: asyncpg.Record) -> dict:
+    return _with_request_id({"job_id": str(page["job_id"]), "idx": page["idx"]}, page.get("request_id"))
+
 
 async def _outbox(conn: asyncpg.Connection, queue: str, payload: dict, delay_s: float = 0) -> None:
     await conn.execute("INSERT INTO outbox_events (queue, payload, delay_s) VALUES ($1, $2, $3)",
@@ -126,8 +136,8 @@ async def split_done(conn: asyncpg.Connection, job_id: uuid.UUID, client_id: str
     """Create the job's pages and queue each one for the fast stage (one transaction).
     Returns False if the job was already split (a duplicate split message)."""
     async with conn.transaction():
-        status = await conn.fetchval("SELECT status FROM jobs WHERE id = $1 FOR UPDATE", job_id)
-        if status != JobStatus.UPLOADED:
+        job = await conn.fetchrow("SELECT status, request_id FROM jobs WHERE id = $1 FOR UPDATE", job_id)
+        if job is None or job["status"] != JobStatus.UPLOADED:
             return False
         idxs = list(range(len(page_keys)))
         await conn.execute(
@@ -136,8 +146,9 @@ async def split_done(conn: asyncpg.Connection, job_id: uuid.UUID, client_id: str
             job_id, client_id, idxs, page_keys)
         await conn.execute(
             "INSERT INTO outbox_events (queue, payload) "
-            "SELECT 'fast', jsonb_build_object('job_id', $1::text, 'idx', i) FROM unnest($2::int[]) AS i",
-            str(job_id), idxs)
+            "SELECT 'fast', jsonb_strip_nulls(jsonb_build_object('job_id', $1::text, 'idx', i, 'request_id', $3::text)) "
+            "FROM unnest($2::int[]) AS i",
+            str(job_id), idxs, job["request_id"])
         await conn.execute("UPDATE jobs SET status = 'SPLIT', total_pages = $2 WHERE id = $1", job_id, len(page_keys))
         await _append_event(conn, job_id, EventKind.JOB_SPLIT, None, {"total_pages": len(page_keys)})
         return True
@@ -159,7 +170,8 @@ async def start_stage(conn: asyncpg.Connection, stage: str, job_id: uuid.UUID, i
         "WITH before AS (SELECT status_at FROM pages WHERE job_id = $1 AND idx = $2 FOR UPDATE) "
         "UPDATE pages SET status = $4, status_at = now() FROM before "
         "WHERE job_id = $1 AND idx = $2 AND stage = $3 AND status <> ALL($5::text[]) "
-        "RETURNING pages.*, extract(epoch FROM now() - before.status_at)::float8 AS waited_s",
+        "RETURNING pages.*, extract(epoch FROM now() - before.status_at)::float8 AS waited_s, "
+        "(SELECT request_id FROM jobs WHERE id = pages.job_id) AS request_id",
         job_id, idx, stage, PROCESSING[stage], _TERMINAL)
 
 
@@ -176,7 +188,7 @@ async def fast_done(conn: asyncpg.Connection, page: asyncpg.Record, *, has_resul
             page["job_id"], page["idx"], "fast", PROCESSING["fast"], has_result, error)
         if not res.endswith(" 1"):
             return False
-        await _outbox(conn, "slow", {"job_id": str(page["job_id"]), "idx": page["idx"]})
+        await _outbox(conn, "slow", _page_message(page))
         return True
 
 
@@ -191,7 +203,7 @@ async def schedule_retry(conn: asyncpg.Connection, page: asyncpg.Record, *, stag
             page["job_id"], page["idx"], stage, PROCESSING[stage], 1 if count_attempt else 0, error)
         if not res.endswith(" 1"):
             return False
-        await _outbox(conn, stage, {"job_id": str(page["job_id"]), "idx": page["idx"]}, delay_s)
+        await _outbox(conn, stage, _page_message(page), delay_s)
         return True
 
 

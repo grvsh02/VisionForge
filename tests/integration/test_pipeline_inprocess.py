@@ -66,10 +66,12 @@ class FakeModels:
         self.pages: Counter[tuple[str, str, int]] = Counter()  # (model, job_id, idx) -> calls
         self.status: dict[str, int] = {}
         self.first: dict[str, tuple[int, int]] = {}
+        self.request_ids: Counter[str | None] = Counter()  # X-Request-ID seen on model calls
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         model = request.url.path.rsplit("/", 1)[1]
         self.calls[model] += 1
+        self.request_ids[request.headers.get("X-Request-ID")] += 1
         found = re.search(rb"pages/([0-9a-f-]{36})/(\d{4})", request.content)
         if found:
             self.pages[(model, found.group(1).decode(), int(found.group(2)))] += 1
@@ -340,3 +342,14 @@ async def test_stream_delivers_live_pages_in_order_and_resumes(pg_dsn, pool, que
         resumed = await http.get(f"/jobs/{job}/stream",
                                  headers={"X-Client-ID": "acme", "Last-Event-ID": str(asm.last_seq)})
         assert "id:" not in resumed.text
+
+
+async def test_every_model_call_and_event_carries_the_jobs_request_id(pg_dsn, pool, queues):
+    models = FakeModels()
+    async with pool.acquire() as conn:
+        job = await create_split_job(conn, "acme", 4, request_id="req-trace-1")
+    async with Pipeline(pg_dsn, pool, queues, models):
+        await wait_complete(pool, [job])
+    assert models.request_ids == {"req-trace-1": 8}  # 4 layout + 4 VLM calls
+    events = await pool.fetch("SELECT envelope FROM events WHERE job_id = $1", job)
+    assert {e["envelope"]["header"]["request_id"] for e in events} == {"req-trace-1"}

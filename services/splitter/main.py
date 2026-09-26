@@ -26,6 +26,7 @@ from PIL import Image, ImageSequence, UnidentifiedImageError
 
 from vf_common import metrics as m
 from vf_common import repo
+from vf_common import tracing
 from vf_common.config import get_settings
 from vf_common.documents import InvalidDocument, count_pages
 from vf_common.db import create_pool
@@ -90,6 +91,10 @@ class Splitter:
             m.sample_rss()
 
     async def _handle(self, msg: Message) -> None:
+        with tracing.bound(request_id=msg.body.get("request_id"), job_id=msg.body.get("job_id")):
+            await self._process(msg)
+
+    async def _process(self, msg: Message) -> None:
         job_id = uuid.UUID(msg.body["job_id"])
         async with self.pool.acquire() as conn:
             job = await repo.get_job(conn, job_id)

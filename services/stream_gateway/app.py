@@ -26,6 +26,7 @@ from prometheus_client import make_asgi_app
 from services.stream_gateway.broker import JobSignals
 from vf_common import metrics as m
 from vf_common import repo
+from vf_common import tracing
 from vf_common.config import get_settings
 from vf_common.db import create_pool
 from vf_common.models import CLIENT_ID_RE, FINAL_EVENT_KINDS, JobStatus
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="visionforge-stream", lifespan=lifespan)
+app.add_middleware(tracing.RequestIdMiddleware)
 app.mount("/metrics", make_asgi_app())
 
 

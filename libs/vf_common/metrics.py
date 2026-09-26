@@ -9,6 +9,8 @@ import sys
 import psutil
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
+from vf_common import tracing
+
 # --- models (architecture doc, section 12) -------------------------------------------
 MODEL_CALLS = Counter("vf_model_calls_total", "Model calls by outcome class", ["model", "outcome"])
 MODEL_LATENCY = Histogram(
@@ -63,6 +65,7 @@ class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         out = {"ts": self.formatTime(record), "level": record.levelname, "logger": record.name,
                "msg": record.getMessage()}
+        out.update(tracing.current())  # request_id / job_id / page of the work being done
         out.update(getattr(record, "fields", {}))
         if record.exc_info:
             out["exc"] = self.formatException(record.exc_info)

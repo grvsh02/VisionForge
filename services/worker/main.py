@@ -37,6 +37,7 @@ from services.worker import stages
 from services.worker.clients import CallResult, ModelClient
 from vf_common import metrics as m
 from vf_common import repo
+from vf_common import tracing
 from vf_common.config import MODELS, Settings, get_settings
 from vf_common.db import create_pool
 from vf_common.errors import MAX_ATTEMPTS, Outcome, backoff_s, deferral_s
@@ -157,6 +158,12 @@ class Worker:
 
     # --- one page ------------------------------------------------------------------------
     async def _handle(self, msg: Message, holder: str, probe: bool) -> None:
+        # Each message runs in its own task, so these log fields stay with this page only.
+        with tracing.bound(request_id=msg.body.get("request_id"), job_id=msg.body.get("job_id"),
+                           page=msg.body.get("idx"), stage=self.stage):
+            await self._process(msg, holder, probe)
+
+    async def _process(self, msg: Message, holder: str, probe: bool) -> None:
         self.inflight[holder] = msg
         verdict_recorded = False
         try:
@@ -204,6 +211,9 @@ class Worker:
         async with self.pool.acquire() as conn:
             await repo.record_attempt(conn, page=page, stage=self.stage, idem_key=idem, outcome=outcome,
                                       http_status=res.status, latency_ms=int(res.latency_s * 1000))
+        log.info("model call", extra={"fields": {"model": self.model.name, "outcome": outcome, "status": res.status,
+                                                 "latency_ms": int(res.latency_s * 1000), "attempt": attempts + 1,
+                                                 "replay": res.replay}})
         if outcome == Outcome.OK:
             await self._succeed(page, res.body)
         elif outcome == Outcome.THROTTLED:
@@ -308,7 +318,8 @@ class Worker:
     async def _to_dlq(self, page: asyncpg.Record, reason: str) -> None:
         try:
             await self.queues.send_batch(f"{self.stage}-dlq", [(
-                {"job_id": str(page["job_id"]), "idx": page["idx"], "stage": self.stage, "reason": reason}, 0)])
+                {"job_id": str(page["job_id"]), "idx": page["idx"], "stage": self.stage, "reason": reason,
+                 "request_id": page.get("request_id")}, 0)])
             m.DLQ_SENT.labels(self.stage).inc()
         except Exception:  # noqa: BLE001 - the page's state is already committed; the copy is for inspection
             log.exception("could not copy to DLQ")

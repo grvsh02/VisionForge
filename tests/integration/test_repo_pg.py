@@ -158,3 +158,28 @@ async def test_status_counts_and_outbox_backlog(pool):
         await publish_all(conn)
         assert (await repo.status_counts(conn))["FAST_QUEUED"][0] == 3
         assert (await repo.outbox_backlog(conn))[0] == 0
+
+
+async def test_request_id_travels_in_every_message_and_event(pool):
+    async with pool.acquire() as conn:
+        await repo.ensure_client(conn, "acme")
+        job_id = uuid.uuid4()
+        await repo.create_job(conn, job_id=job_id, client_id="acme", content_type="application/pdf",
+                              object_key="uploads/x", size_bytes=1, total_pages=2, request_id="req-42")
+        assert (await outbox(conn, "split"))[0]["payload"] == {"job_id": str(job_id), "request_id": "req-42"}
+        await conn.execute("UPDATE outbox_events SET sent_at = now() WHERE queue = 'split'")
+        assert await repo.split_done(conn, job_id, "acme", ["pages/a", "pages/b"])
+        assert {r["payload"]["request_id"] for r in await outbox(conn, "fast")} == {"req-42"}
+
+        started = await repo.start_stage(conn, "fast", job_id, 0)
+        assert started["request_id"] == "req-42"
+        assert await repo.fast_done(conn, started, has_result=True)
+        assert (await outbox(conn, "slow"))[0]["payload"] == {"job_id": str(job_id), "idx": 0, "request_id": "req-42"}
+
+        started = await repo.start_stage(conn, "fast", job_id, 1)
+        assert await repo.schedule_retry(conn, started, stage="fast", delay_s=5, count_attempt=True, error="x")
+        retry = [r for r in await outbox(conn, "fast") if r["delay_s"] == 5]
+        assert retry[0]["payload"]["request_id"] == "req-42"
+
+        events = await repo.fetch_events(conn, job_id, 0, 10)
+        assert events and all(e["envelope"]["header"]["request_id"] == "req-42" for e in events)

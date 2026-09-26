@@ -161,3 +161,20 @@ async def test_evaluate_scores_a_real_page_tree(http):
     drifted = {**tree, "children": tree["children"][1:]}  # the model missed the first block
     body = (await http.post(f"{BASE}/evaluate", json={"predicted": drifted, "ground_truth": tree})).json()
     assert body["tree"]["ted"] == 1 and body["bbox"]["recall"] < 1 and body["text"]["cer"] > 0
+
+
+async def test_request_id_is_echoed_stored_and_streamed(http):
+    client_id, rid = cid("trace"), f"e2e-{uuid.uuid4().hex[:12]}"
+    doc = fixture(5)
+    resp = await http.post(f"{BASE}/jobs", content=doc.read_bytes(),
+                           headers={"X-Client-ID": client_id, "Content-Type": "application/pdf", "X-Request-ID": rid})
+    assert resp.status_code == 202 and resp.headers["X-Request-ID"] == rid and resp.json()["request_id"] == rid
+    job_id = resp.json()["job_id"]
+    frames = []
+    await stream(http, BASE, client_id, job_id, on_frame=lambda kind, frame, t: frames.append(frame))
+    assert frames and {f["header"]["request_id"] for f in frames} == {rid}
+    status = (await http.get(f"{BASE}/jobs/{job_id}", headers={"X-Client-ID": client_id})).json()
+    assert status["request_id"] == rid
+
+    generated = await submit(http, BASE, client_id, doc)  # no X-Request-ID: one is generated
+    assert generated.json()["request_id"] == generated.headers["X-Request-ID"] and len(generated.headers["X-Request-ID"]) == 32

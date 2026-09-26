@@ -38,6 +38,8 @@ from fastapi.responses import JSONResponse, Response
 from prometheus_client import Counter, make_asgi_app
 from redis.asyncio import Redis
 
+from vf_common import tracing
+
 MODEL = os.environ.get("MOCK_MODEL", "vlm")
 DEFAULTS = {
     "layout": {"rps": 100.0, "lat_min": 0.05, "lat_max": 0.05, "failure_rate": 0.02},
@@ -69,6 +71,7 @@ class Chaos:
 REQUESTS = Counter("mock_requests_total", "Requests by outcome", ["model", "outcome"])
 
 app = FastAPI(title=f"mock-{MODEL}")
+app.add_middleware(tracing.RequestIdMiddleware)
 app.mount("/metrics", make_asgi_app())
 chaos = Chaos()
 redis = Redis.from_url(os.environ.get("VF_REDIS_URL", "redis://localhost:6379/0"))

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import httpx
 
 from vf_common.config import Model, Settings
+from vf_common import tracing
 from vf_common.errors import Outcome, classify
 
 
@@ -53,7 +54,7 @@ class ModelClient:
             resp = await self.http.post(
                 self.url, files={"file": ("page.pdf", data, "application/pdf")},
                 data={"hints": json.dumps(hints)} if hints else None,
-                headers={"Idempotency-Key": idem_key}, timeout=self.timeout_s)
+                headers={"Idempotency-Key": idem_key, **tracing.headers()}, timeout=self.timeout_s)
         except httpx.TimeoutException:
             return CallResult(None, time.perf_counter() - start, timed_out=True, error="timeout")
         except httpx.HTTPError as exc:
