@@ -1,0 +1,181 @@
+{
+  "info": {
+    "_postman_id": "aa6f8cc4-cc52-41c8-837f-7317f464cc91",
+    "name": "VisionForge",
+    "description": "Upload a document, poll its status and fetch its page results.\n\nRun the requests in order: *post_job* saves `jobId` for the other two. To run all three in one go, use the Collection Runner: *get_jobs* then polls until the job finishes.\n\nAll requests go through the edge (`baseUrl`, default `http://localhost:8080`) and need `X-Client-ID` (`clientId`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "post_job",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"202 Accepted\", () => pm.response.to.have.status(202));",
+              "const body = pm.response.json();",
+              "pm.test(\"returns a job id and the page count\", () => {",
+              "    pm.expect(body.job_id).to.be.a(\"string\");",
+              "    pm.expect(body.status).to.eql(\"UPLOADED\");",
+              "    pm.expect(body.total_pages).to.be.above(0);",
+              "});",
+              "pm.collectionVariables.set(\"jobId\", body.job_id);",
+              "pm.collectionVariables.set(\"polls\", 0);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "X-Client-ID",
+            "value": "{{clientId}}",
+            "description": "Required. Jobs are only visible to the client that submitted them."
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/pdf"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/jobs",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "jobs"
+          ]
+        },
+        "description": "Upload a document (the raw file bytes are the request body, not multipart).\n\n**Headers**\n- `X-Client-ID`: your client id (`[A-Za-z0-9._-]{1,64}`)\n- `Content-Type`: `application/pdf`, `image/tiff`, `image/png` or `image/jpeg`\n\n**Body**: *binary*. Pick a file in the Body tab (e.g. `fixtures/doc5.pdf` from the repo).\n\n**Responses**\n- `202` `{job_id, status: \"UPLOADED\", size_bytes, total_pages, stream_url}`: the test script saves `job_id` into the `jobId` collection variable\n- `400` missing/invalid `X-Client-ID` or empty body\n- `413` over 100 MB, `415` unsupported Content-Type, `422` unreadable document or more than 100 pages\n- `429` edge rate limit (10 uploads/s per IP and per client, burst 20)",
+        "body": {
+          "mode": "file",
+          "file": {
+            "src": "/Users/grvsh02/Documents/VisionForge/fixtures/doc5.pdf"
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "get_jobs",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "const job = pm.response.json();",
+              "pm.test(\"has a status and page counts\", () => {",
+              "    pm.expect(job.status).to.be.oneOf([\"UPLOADED\", \"SPLIT\", \"COMPLETE\", \"FAILED\"]);",
+              "    pm.expect(job.pages).to.be.an(\"object\");",
+              "});",
+              "",
+              "// Collection Runner only: poll until the job finishes, then continue to get_job_results.",
+              "const polls = Number(pm.collectionVariables.get(\"polls\") || 0);",
+              "if (![\"COMPLETE\", \"FAILED\"].includes(job.status) && polls < 90) {",
+              "    pm.collectionVariables.set(\"polls\", polls + 1);",
+              "    postman.setNextRequest(\"get_jobs\");",
+              "    setTimeout(() => {}, 2000);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Client-ID",
+            "value": "{{clientId}}",
+            "description": "Required. Jobs are only visible to the client that submitted them."
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/jobs/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "jobs",
+            "{{jobId}}"
+          ]
+        },
+        "description": "Status of one job (uses the `jobId` saved by *post_job*).\n\n**Response** `200`:\n```\n{job_id, status, total_pages, pages: {<page status>: count}, error, created_at, completed_at}\n```\n- `status`: `UPLOADED` -> `SPLIT` -> `COMPLETE` (or `FAILED`)\n- `pages`: page counts by status, e.g. `{\"SLOW_QUEUED\": 3, \"COMPLETED\": 2}`\n\n`404` if the job doesn't exist **or belongs to another X-Client-ID**.\n\nIn the Collection Runner this request repeats every 2 s until the job is `COMPLETE` or `FAILED` (at most 90 times), so *get_job_results* runs on a finished job."
+      },
+      "response": []
+    },
+    {
+      "name": "get_job_results",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "const res = pm.response.json();",
+              "pm.test(\"pages are in document order\", () => {",
+              "    const idx = res.pages.map(p => p.page_index);",
+              "    pm.expect(idx).to.eql([...idx].sort((a, b) => a - b));",
+              "});",
+              "pm.test(\"each page has a result\", () => {",
+              "    res.pages.forEach(p => {",
+              "        pm.expect(p.state).to.be.oneOf([\"COMPLETED\", \"FAILED\"]);",
+              "        pm.expect(p.result.page_index).to.eql(p.page_index);",
+              "    });",
+              "});",
+              "if (res.status === \"COMPLETE\") {",
+              "    pm.test(\"a complete job lists every page\", () => pm.expect(res.pages.length).to.eql(res.total_pages));",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "X-Client-ID",
+            "value": "{{clientId}}",
+            "description": "Required. Jobs are only visible to the client that submitted them."
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/jobs/{{jobId}}/result",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "jobs",
+            "{{jobId}}",
+            "result"
+          ]
+        },
+        "description": "Every finished page of the job, in document order. These are the same payloads as the stream's page events.\n\n**Response** `200`:\n```\n{job_id, status, total_pages,\n pages: [{page_index, state: \"COMPLETED\" | \"FAILED\", source: \"vlm\" | \"layout_fallback\" | \"none\",\n          low_confidence, result: {page_index, source, confidence, low_confidence, tree, text,\n                                   tables_markdown, key_values, error}}]}\n```\nWhile the job is still running, only the pages finished so far are listed. `404` if the job doesn't exist or belongs to another X-Client-ID."
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "clientId",
+      "value": "acme"
+    },
+    {
+      "key": "jobId",
+      "value": ""
+    },
+    {
+      "key": "polls",
+      "value": "0"
+    }
+  ]
+}

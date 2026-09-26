@@ -1,0 +1,422 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "VisionForge request flow",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1390,
+      560
+    ],
+    "views": [
+      {
+        "id": "upload-route",
+        "label": "Upload → pages",
+        "focus": [
+          "client",
+          "edge",
+          "ingest",
+          "postgres",
+          "publisher",
+          "sqs",
+          "splitter"
+        ],
+        "note": "POST /jobs commits the job + a split outbox row; the publisher queues it; the splitter writes one page per row."
+      },
+      {
+        "id": "page-route",
+        "label": "Page processing",
+        "focus": [
+          "sqs",
+          "fastw",
+          "models",
+          "sloww",
+          "postgres",
+          "publisher"
+        ],
+        "note": "Each page: vf-fast → layout → slow outbox → vf-slow → VLM → COMPLETED + page event."
+      },
+      {
+        "id": "failure-routes",
+        "label": "Retries and failures",
+        "focus": [
+          "fastw",
+          "sloww",
+          "models",
+          "postgres",
+          "publisher",
+          "sqs",
+          "dlq"
+        ],
+        "note": "Retries go back through the outbox with a delay; a slow give-up falls back to the fast result and is copied to the DLQ."
+      },
+      {
+        "id": "stream-route",
+        "label": "Streaming results",
+        "focus": [
+          "postgres",
+          "stream",
+          "edge",
+          "client"
+        ],
+        "note": "Each committed page event NOTIFYs the gateway; clients resume with Last-Event-ID."
+      },
+      {
+        "id": "read-route",
+        "label": "Status and result reads",
+        "focus": [
+          "client",
+          "edge",
+          "ingest",
+          "postgres"
+        ],
+        "note": "GET /jobs/{id} and /result read Postgres; another X-Client-ID gets 404."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "Client",
+      "sublabel": "X-Client-ID",
+      "pos": [
+        10,
+        20
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "edge",
+      "type": "security",
+      "label": "Edge · nginx",
+      "sublabel": ":8080",
+      "tag": "429 over limit",
+      "pos": [
+        10,
+        128
+      ],
+      "size": [
+        120,
+        64
+      ]
+    },
+    {
+      "id": "ingest",
+      "type": "backend",
+      "label": "Ingest API",
+      "sublabel": "POST /jobs · GET /jobs/{id}",
+      "pos": [
+        190,
+        128
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "stream",
+      "type": "backend",
+      "label": "Stream Gateway",
+      "sublabel": "SSE · WebSocket",
+      "pos": [
+        190,
+        20
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "jobs · pages · outbox · events",
+      "pos": [
+        490,
+        110
+      ],
+      "size": [
+        180,
+        100
+      ]
+    },
+    {
+      "id": "splitter",
+      "type": "backend",
+      "label": "Splitter",
+      "sublabel": "1 PDF per page",
+      "pos": [
+        310,
+        300
+      ],
+      "size": [
+        120,
+        70
+      ]
+    },
+    {
+      "id": "fastw",
+      "type": "backend",
+      "label": "Fast worker",
+      "sublabel": "layout stage",
+      "pos": [
+        520,
+        300
+      ],
+      "size": [
+        120,
+        70
+      ]
+    },
+    {
+      "id": "models",
+      "type": "external",
+      "label": "Model APIs",
+      "sublabel": "layout · VLM",
+      "pos": [
+        710,
+        300
+      ],
+      "size": [
+        130,
+        70
+      ]
+    },
+    {
+      "id": "sloww",
+      "type": "backend",
+      "label": "Slow worker",
+      "sublabel": "VLM stage",
+      "pos": [
+        910,
+        300
+      ],
+      "size": [
+        120,
+        70
+      ]
+    },
+    {
+      "id": "dlq",
+      "type": "messagebus",
+      "label": "DLQs",
+      "sublabel": "vf-*-dlq",
+      "pos": [
+        1110,
+        300
+      ],
+      "size": [
+        110,
+        70
+      ]
+    },
+    {
+      "id": "publisher",
+      "type": "backend",
+      "label": "Outbox Publisher",
+      "sublabel": "claim · send · mark",
+      "pos": [
+        1255,
+        300
+      ],
+      "size": [
+        125,
+        70
+      ]
+    },
+    {
+      "id": "sqs",
+      "type": "messagebus",
+      "label": "SQS · ElasticMQ",
+      "sublabel": "vf-split · vf-fast · vf-slow",
+      "pos": [
+        490,
+        460
+      ],
+      "size": [
+        180,
+        80
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "client-edge",
+      "from": "client",
+      "to": "edge",
+      "label": "HTTP",
+      "variant": "emphasis",
+      "labelAt": [
+        70,
+        106
+      ]
+    },
+    {
+      "id": "edge-ingest",
+      "from": "edge",
+      "to": "ingest",
+      "label": "/jobs",
+      "variant": "emphasis",
+      "labelDy": 16
+    },
+    {
+      "id": "edge-stream",
+      "from": "edge",
+      "to": "stream",
+      "label": "/stream · /ws"
+    },
+    {
+      "id": "ingest-postgres",
+      "from": "ingest",
+      "to": "postgres",
+      "label": "job + outbox, 1 tx",
+      "variant": "emphasis"
+    },
+    {
+      "id": "postgres-stream",
+      "from": "postgres",
+      "to": "stream",
+      "label": "LISTEN job_events",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "postgres-publisher",
+      "from": "postgres",
+      "to": "publisher",
+      "label": "NOTIFY outbox",
+      "fromSide": "right",
+      "toSide": "top"
+    },
+    {
+      "id": "publisher-sqs",
+      "from": "publisher",
+      "to": "sqs",
+      "label": "SendMessage + delay",
+      "fromSide": "bottom",
+      "toSide": "right",
+      "via": [
+        [
+          1317.5,
+          500
+        ]
+      ]
+    },
+    {
+      "id": "sqs-splitter",
+      "from": "sqs",
+      "to": "splitter",
+      "label": "vf-split",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "sqs-fastw",
+      "from": "sqs",
+      "to": "fastw",
+      "label": "vf-fast",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        580,
+        392
+      ]
+    },
+    {
+      "id": "sqs-sloww",
+      "from": "sqs",
+      "to": "sloww",
+      "label": "vf-slow",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "splitter-postgres",
+      "from": "splitter",
+      "to": "postgres",
+      "label": "pages + outbox",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "fastw-postgres",
+      "from": "fastw",
+      "to": "postgres",
+      "label": "state + outbox",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "sloww-postgres",
+      "from": "sloww",
+      "to": "postgres",
+      "label": "state + event",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "fastw-models",
+      "from": "fastw",
+      "to": "models",
+      "label": "layout"
+    },
+    {
+      "id": "sloww-models",
+      "from": "sloww",
+      "to": "models",
+      "label": "VLM"
+    },
+    {
+      "id": "sloww-dlq",
+      "from": "sloww",
+      "to": "dlq",
+      "label": "give up",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Upload → pages",
+      "items": [
+        "Edge: 400 without X-Client-ID · 429 over 10 uploads/s",
+        "Ingest: PDF → S3, then job + split outbox in one tx",
+        "Splitter: one PDF per page, then pages + fast outbox"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Page route",
+      "items": [
+        "vf-fast → layout → FAST_COMPLETED + slow outbox",
+        "vf-slow → VLM → COMPLETED + page event → stream",
+        "GET /jobs/{id} and /result read Postgres (owner only)"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Retries and failures",
+      "items": [
+        "429 → wait for Retry-After, no attempt used",
+        "Timeout / 5xx → RETRY_WAIT + delayed outbox, 3 attempts",
+        "Slow give-up → fast result (low_confidence) + DLQ",
+        "Crash → message redelivered after 60 s"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "Beside the path",
+      "items": [
+        "S3: uploads, pages, results/{job}/pages/{idx}/…",
+        "Redis: rate, concurrency, 10 s windows, breaker",
+        "A deep slow queue throttles the fast stage"
+      ]
+    }
+  ]
+}
