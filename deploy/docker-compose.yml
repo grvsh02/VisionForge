@@ -1,0 +1,181 @@
+# VisionForge stack. `make up` builds and starts everything; the edge is on :8080.
+# Set VF_LATENCY_SCALE (e.g. 0.1) to speed up the mock models for local testing.
+name: visionforge
+
+# Cap TCP buffer autotuning. Socket buffers are charged to the container's memory cgroup, and
+# on a fast link a big upload can autotune to ~30 MB per connection (measured: 117 MiB for 4
+# concurrent 100 MB uploads through nginx). Capping them keeps backpressure in TCP instead.
+x-tcp-buffers: &tcp_buffers
+  net.ipv4.tcp_rmem: "4096 131072 1048576"
+  net.ipv4.tcp_wmem: "4096 131072 1048576"
+
+x-app: &app
+  image: visionforge:latest  # built by `make build` (docker build -t visionforge:latest .)
+  pull_policy: never
+  restart: unless-stopped
+  environment: &env
+    VF_DATABASE_URL: postgresql://vf:vf@postgres:5432/vf
+    VF_REDIS_URL: redis://redis:6379/0
+    VF_S3_ENDPOINT: http://s3:8333
+    VF_S3_ACCESS_KEY: visionforge
+    VF_S3_SECRET_KEY: visionforge
+    VF_SQS_ENDPOINT: http://sqs:9324
+    VF_LAYOUT_URL: http://mock-layout:8000
+    VF_VLM_URL: http://mock-vlm:8000
+    VF_LATENCY_SCALE: ${VF_LATENCY_SCALE:-1.0}
+    VF_LOG_LEVEL: INFO
+  depends_on: &deps
+    migrate:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    s3:
+      condition: service_healthy
+    sqs:
+      condition: service_healthy
+
+services:
+  # --- infrastructure ---------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=300", "-c", "shared_buffers=128MB"]
+    environment: {POSTGRES_USER: vf, POSTGRES_PASSWORD: vf, POSTGRES_DB: vf}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vf -d vf"]
+      interval: 2s
+      retries: 30
+    mem_limit: 512m
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "200mb", "--maxmemory-policy", "volatile-lru", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+    mem_limit: 256m
+
+  s3:
+    image: chrislusf/seaweedfs:4.47
+    restart: unless-stopped
+    command: ["server", "-s3", "-dir=/data", "-ip.bind=0.0.0.0", "-volume.max=0"]
+    environment: {GOMEMLIMIT: 700MiB}
+    ports: ["8333:8333"]
+    volumes: [s3data:/data]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 2s
+      retries: 60
+    mem_limit: 1g
+
+  sqs:
+    image: softwaremill/elasticmq-native:1.6.14
+    restart: unless-stopped
+    ports: ["9324:9324", "9325:9325"]  # API, web UI
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "9324"]
+      interval: 2s
+      retries: 30
+    mem_limit: 256m
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["python", "-m", "vf_common.db", "migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- mock model endpoints -----------------------------------------------------------
+  mock-layout:
+    <<: *app
+    command: ["uvicorn", "services.mock_models.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment: {<<: *env, MOCK_MODEL: layout}
+    ports: ["8081:8000"]
+    depends_on: {redis: {condition: service_healthy}}
+    mem_limit: 256m
+
+  mock-vlm:
+    <<: *app
+    command: ["uvicorn", "services.mock_models.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    environment: {<<: *env, MOCK_MODEL: vlm}
+    ports: ["8082:8000"]
+    depends_on: {redis: {condition: service_healthy}}
+    mem_limit: 256m
+
+  # --- VisionForge services -------------------------------------------------------------
+  ingest-api:
+    <<: *app
+    command: ["uvicorn", "services.ingest_api.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    sysctls: *tcp_buffers
+    mem_limit: 256m
+
+  outbox-publisher:
+    <<: *app
+    command: ["python", "-m", "services.outbox_publisher.main"]
+    mem_limit: 192m
+
+  splitter:
+    <<: *app
+    command: ["python", "-m", "services.splitter.main"]
+    tmpfs: ["/tmp:size=256m"]
+    mem_limit: 384m
+
+  fast-worker:
+    <<: *app
+    command: ["python", "-m", "services.worker.main"]
+    environment: {<<: *env, VF_STAGE: fast}
+    depends_on: {<<: *deps, mock-layout: {condition: service_started}}
+    mem_limit: 256m
+
+  slow-worker:
+    <<: *app
+    command: ["python", "-m", "services.worker.main"]
+    environment: {<<: *env, VF_STAGE: slow}
+    depends_on: {<<: *deps, mock-vlm: {condition: service_started}}
+    mem_limit: 256m
+
+  stream-gateway:
+    <<: *app
+    command: ["uvicorn", "services.stream_gateway.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    mem_limit: 256m
+
+  edge:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes: ["./nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["8080:80"]
+    depends_on: [ingest-api, stream-gateway]
+    sysctls: *tcp_buffers
+    mem_limit: 128m
+
+  # --- observability --------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    mem_limit: 512m
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    mem_limit: 256m
+
+volumes:
+  pgdata:
+  s3data:

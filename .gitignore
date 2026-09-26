@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+fixtures/
+out*.json
+reports/
+.DS_Store
+results/
+.terraform/
+*.tfstate
+*.tfstate.*
