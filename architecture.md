@@ -51,7 +51,6 @@ VisionForge/
 ├── docs/diagrams/                # Request-flow and AWS deployment diagrams (see §2)
 ├── postman/                      # Postman collection for the HTTP APIs
 ├── reports/                      # Saved outputs of test runs (see §10 for which are current)
-├── adaptive_inference_pipeline_architecture.docx   # Design document
 ├── Dockerfile, Makefile, pyproject.toml, uv.lock
 ├── README.md                     # Overview and quick start
 └── architecture.md               # This document
@@ -104,7 +103,9 @@ Description: `POST /jobs` handles an upload:
 1. It checks the content type (PDF, TIFF, PNG or JPEG) and size.
 2. It streams the body to S3 and to a temp file. The S3 upload is pipelined; see §6.3.
 3. It counts the pages, rejecting unreadable documents or more than 100 pages with 422.
-4. In one transaction it inserts the job and a `split` outbox row, then returns 202 with `job_id`, `total_pages` and `stream_url`.
+4. In one transaction it inserts the job and a `split` outbox row, then returns 202 with `job_id`, `request_id`, `total_pages` and `stream_url`.
+
+It accepts a well-formed `X-Request-ID` or generates one, and stores it on the job as the correlation ID for everything that follows (§9).
 
 A 100 MB upload takes about 0.7 s.
 
@@ -285,9 +286,9 @@ state change + outbox row (1 tx) ─NOTIFY─► outbox publisher ─► SQS que
 
 | Queue | Outbox row written by | Consumer | Message body |
 |---|---|---|---|
-| `vf-split` | Ingest (job accepted) | Splitter | `{job_id}` |
-| `vf-fast` | Splitter (pages created); layout worker (its own retries) | Layout worker | `{job_id, idx}` |
-| `vf-slow` | Layout worker (page done or given up); VLM worker (its own retries) | VLM worker | `{job_id, idx}` |
+| `vf-split` | Ingest (job accepted) | Splitter | `{job_id, request_id}` |
+| `vf-fast` | Splitter (pages created); layout worker (its own retries) | Layout worker | `{job_id, idx, request_id}` |
+| `vf-slow` | Layout worker (page done or given up); VLM worker (its own retries) | VLM worker | `{job_id, idx, request_id}` |
 | `vf-*-dlq` | Workers (copy of a given-up page); SQS redrive after 5 receives | Nobody; for inspection | as above, plus `reason` |
 
 **Why an outbox:** a database commit and an SQS send can't be one atomic operation. Writing the message as a row in the same transaction, and publishing it afterwards, means state and work can never disagree.
@@ -514,6 +515,10 @@ Monitoring & Logging:
   - `vf_outbox_oldest_seconds`, `vf_dlq_sent_total`, `vf_breaker_open`
   - `vf_page_end_to_end_seconds`, `vf_eval_seconds`
 - **Alarms:** oldest unsent outbox row, oldest queued page, DLQ depth, breaker open.
+- **Correlation ([tracing.py](libs/vf_common/tracing.py)):**
+  - The ingest request's `X-Request-ID` is stored on the job. It travels in every SQS message (retries and DLQ copies included), is forwarded to the model APIs, and appears in each stream frame's `header.request_id`.
+  - It's added to every JSON log line for that job's work, together with `job_id` and `page`, through a context variable. Nothing passes it by hand, and asyncio keeps each page task's value separate.
+  - Grepping one ID across the ingest, splitter and worker logs shows a document's whole path, including each model call with its outcome, latency and attempt number.
 
 ## 10. Development & Testing Environment
 
@@ -619,6 +624,8 @@ Layout / VLM stage: The two model stages; each has one worker and one queue. The
 
 Idempotency key: `sha256(job:page:model:version)`, sent with every model call so retries replay cached results.
 
+X-Request-ID: The correlation ID of an ingestion. It's chosen at the ingest API (the client's, if well-formed), stored on the job, and carried through messages, model calls, stream frames and logs.
+
 IoU: Intersection over Union of two bounding boxes.
 
 Outbox: `outbox_events` rows written in the same transaction as a state change, then published to SQS by the outbox publisher.
@@ -639,7 +646,6 @@ Window (controller): A 10 s bucket of model-call outcomes that the controller ju
 
 | Artefact | Path |
 |---|---|
-| Design document | [adaptive_inference_pipeline_architecture.docx](adaptive_inference_pipeline_architecture.docx) |
 | Request-flow diagram (interactive) | [docs/diagrams/request-flow.html](docs/diagrams/request-flow.html) ([spec](docs/diagrams/request-flow.architecture.json)) |
 | AWS deployment diagram | [docs/diagrams/aws-architecture.drawio](docs/diagrams/aws-architecture.drawio), [PNG](docs/diagrams/aws-architecture.drawio.png), [guide](docs/diagrams/aws-architecture.md) |
 | Postman collection | [postman/visionforge.postman_collection.json](postman/visionforge.postman_collection.json) |

@@ -80,8 +80,9 @@ Use `make up` for real mock latencies and `make down` to stop the stack and dele
 ## API
 
 ```
-POST /jobs                  X-Client-ID, Content-Type: application/pdf|image/tiff|image/png|image/jpeg
-                            → 202 {job_id, total_pages, stream_url}
+POST /jobs                  X-Client-ID, Content-Type: application/pdf|image/tiff|image/png|image/jpeg,
+                            X-Request-ID (optional; generated if missing or malformed, echoed back)
+                            → 202 {job_id, request_id, total_pages, stream_url}
                             → 422 unreadable or > 100 pages | 413 > 100 MB | 429 edge rate limit
 GET  /jobs/{id}             status + page-status counts (only the owning client)
 GET  /jobs/{id}/result      pages in document order
@@ -96,7 +97,7 @@ Stream frames:
 ```
 id: 17
 event: page_result          # job_split | page_result | page_fallback | page_failed | job_complete | job_failed
-data: {"header": {"job_id", "client_id", "seq": 17, "page_index": 10, "total_pages": 100,
+data: {"header": {"job_id", "client_id", "request_id", "seq": 17, "page_index": 10, "total_pages": 100,
                   "watermark": 2,                     # every page < 2 has been emitted
                   "window": {"base": 2, "size": 64, "bitmap": "<base64>"},  # emitted pages in [base, base+size)
                   "emitted_at"},
@@ -218,6 +219,12 @@ uploads get `429` with `Retry-After`; excess connections get `503`.
   - **SeaweedFS.** It is a Go program and ignores the cgroup limit until it is OOM-killed. `GOMEMLIMIT=700MiB` keeps its heap at about 560 MiB under the same load.
 
 ### Observability
+
+**Correlation.** The ingest API accepts a well-formed `X-Request-ID` (letters, digits, `._:-`, up to 128 characters) or generates one. It returns the ID on the response and stores it on the job. From there it travels in every SQS message (including retries and DLQ copies), is forwarded to the model APIs as `X-Request-ID`, appears in every stream frame's `header.request_id`, and is added to every JSON log line written for that job's work, together with `job_id` and `page` ([tracing.py](libs/vf_common/tracing.py)). Every HTTP service also echoes an `X-Request-ID` on its own responses. To follow one document through the system:
+
+```bash
+docker compose -f deploy/docker-compose.yml logs ingest-api splitter fast-worker slow-worker | grep '"request_id": "<id>"'
+```
 
 Every service exposes Prometheus metrics. The main ones:
 - **Model calls and limits:**
