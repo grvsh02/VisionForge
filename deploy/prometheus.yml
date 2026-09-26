@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  # HTTP services expose /metrics/ on their API port.
+  - job_name: http-services
+    metrics_path: /metrics/
+    dns_sd_configs:
+      - names: [ingest-api, stream-gateway, eval-api, mock-layout, mock-vlm]
+        type: A
+        port: 8000
+  # Background services run a metrics server on :9100 (every replica is discovered).
+  - job_name: workers
+    dns_sd_configs:
+      - names: [fast-worker, slow-worker, splitter, outbox-publisher]
+        type: A
+        port: 9100

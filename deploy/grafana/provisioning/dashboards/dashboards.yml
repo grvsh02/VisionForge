@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: visionforge
+    folder: VisionForge
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
