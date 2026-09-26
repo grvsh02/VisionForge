@@ -81,6 +81,21 @@ async def test_resume_with_last_event_id_replays_only_newer_events(http):
     assert ids == [f"id: {full.last_seq}"]
 
 
+async def test_status_and_result_endpoints_match_the_stream(http):
+    client_id = cid("result")
+    job_id = (await submit(http, BASE, client_id, fixture(5))).json()["job_id"]
+    streamed = await stream(http, BASE, client_id, job_id)
+    headers = {"X-Client-ID": client_id}
+    status = (await http.get(f"{BASE}/jobs/{job_id}", headers=headers)).json()
+    assert status["status"] == "COMPLETE" and status["pages"] == {"COMPLETED": 5}
+    resp = await http.get(f"{BASE}/jobs/{job_id}/result", headers=headers)
+    assert resp.status_code == 200, resp.text
+    pages = resp.json()["pages"]
+    assert [p["page_index"] for p in pages] == list(range(5))
+    assert {p["state"] for p in pages} == {"COMPLETED"}
+    assert [p["result"] for p in pages] == streamed.ordered  # same payloads as the stream
+
+
 async def test_vlm_failures_fall_back_to_layout_with_low_confidence(http, chaos):
     await chaos("vlm", failure_rate=1.0)
     [asm] = await run_jobs(http, cid("fallback"), fixture(5), 1)
@@ -129,3 +144,20 @@ async def test_upload_counts_pages_and_rejects_bad_documents(http, tmp_path):
 
     status = (await http.get(f"{BASE}/jobs/{ok.json()['job_id']}", headers={"X-Client-ID": client_id})).json()
     assert status["total_pages"] == 20  # stored at upload, before the splitter runs
+
+
+async def test_evaluate_scores_a_real_page_tree(http):
+    client_id = cid("eval")
+    job_id = (await submit(http, BASE, client_id, fixture(5))).json()["job_id"]
+    await stream(http, BASE, client_id, job_id)
+    pages = (await http.get(f"{BASE}/jobs/{job_id}/result", headers={"X-Client-ID": client_id})).json()["pages"]
+    tree = pages[0]["result"]["tree"]
+
+    same = await http.post(f"{BASE}/evaluate", json={"predicted": tree, "ground_truth": tree})
+    assert same.status_code == 200, same.text
+    body = same.json()
+    assert body["text"]["cer"] == 0 and body["bbox"]["f1"] == 1 and body["tree"]["ted"] == 0
+
+    drifted = {**tree, "children": tree["children"][1:]}  # the model missed the first block
+    body = (await http.post(f"{BASE}/evaluate", json={"predicted": drifted, "ground_truth": tree})).json()
+    assert body["tree"]["ted"] == 1 and body["bbox"]["recall"] < 1 and body["text"]["cer"] > 0

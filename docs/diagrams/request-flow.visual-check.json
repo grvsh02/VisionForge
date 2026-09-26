@@ -7,8 +7,8 @@
   "visualReview": "pending",
   "artifact": {
     "path": "/Users/grvsh02/Documents/VisionForge/docs/diagrams/request-flow.html",
-    "sha256": "58d7231f2069f7c69b8de4b777da4f1db682fe8160eb2a3790bd019b1b5f4e1f",
-    "bytes": 817745
+    "sha256": "9c2971a7d899b31f5832c767e9c4cb7bae41069d9245e953f692179767bd0de9",
+    "bytes": 819614
   },
   "state": {
     "detail": "read",
@@ -95,8 +95,8 @@
         "overflowX": false,
         "overflowY": false,
         "ok": true,
-        "readerWidth": 1542,
-        "diagramWidth": 1512,
+        "readerWidth": 1502,
+        "diagramWidth": 1472,
         "viewBoxWidth": 1390,
         "minimumProjectedNodeTextPx": 9,
         "minimumProjectedNodeText": "X-Client-ID",
@@ -225,8 +225,8 @@
         "overflowX": false,
         "overflowY": false,
         "ok": true,
-        "readerWidth": 1542,
-        "diagramWidth": 1512,
+        "readerWidth": 1502,
+        "diagramWidth": 1472,
         "viewBoxWidth": 1390,
         "minimumProjectedNodeTextPx": 9,
         "minimumProjectedNodeText": "X-Client-ID",
@@ -354,8 +354,8 @@
         "overflowX": false,
         "overflowY": false,
         "ok": true,
-        "readerWidth": 1542,
-        "diagramWidth": 1512,
+        "readerWidth": 1502,
+        "diagramWidth": 1472,
         "viewBoxWidth": 1390,
         "minimumProjectedNodeTextPx": 9,
         "minimumProjectedNodeText": "X-Client-ID",

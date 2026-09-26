@@ -1,7 +1,7 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 BASE_URL ?= http://localhost:8080
 
-.PHONY: build up fast-up down logs ps test integration e2e fixtures load chaos backpressure
+.PHONY: build up fast-up down logs ps test integration e2e fixtures load chaos backpressure k6-ingest
 
 build:
 	docker build -t visionforge:latest .
@@ -44,3 +44,11 @@ chaos:
 
 backpressure:
 	uv run python scripts/backpressure_demo.py --base-url $(BASE_URL)
+
+# 50 concurrent jobs x 20 pages (1,000 pages) through the edge; prints throughput/latency.
+K6_JOBS ?= 50
+K6_PAGE_KB ?= 100
+k6-ingest:
+	@mkdir -p results
+	uv run python -c "from scripts.common import fixture; fixture(20, $(K6_PAGE_KB))"
+	k6 run -e BASE_URL=$(BASE_URL) -e JOBS=$(K6_JOBS) -e PDF=$(CURDIR)/fixtures/doc20p_$(K6_PAGE_KB)kb.pdf scripts/k6_ingest.js

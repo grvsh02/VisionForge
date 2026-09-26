@@ -63,14 +63,15 @@
       },
       {
         "id": "read-route",
-        "label": "Status and result reads",
+        "label": "Reads and evaluation",
         "focus": [
           "client",
           "edge",
           "ingest",
-          "postgres"
+          "postgres",
+          "evalapi"
         ],
-        "note": "GET /jobs/{id} and /result read Postgres; another X-Client-ID gets 404."
+        "note": "GET /jobs/{id} and /result read Postgres (owner only); POST /evaluate scores a tree against ground truth, statelessly."
       }
     ]
   },
@@ -130,6 +131,20 @@
       "size": [
         170,
         64
+      ]
+    },
+    {
+      "id": "evalapi",
+      "type": "backend",
+      "label": "Eval API",
+      "sublabel": "CER · WER · IoU · TED",
+      "pos": [
+        0,
+        300
+      ],
+      "size": [
+        140,
+        70
       ]
     },
     {
@@ -270,6 +285,18 @@
       "from": "edge",
       "to": "stream",
       "label": "/stream · /ws"
+    },
+    {
+      "id": "edge-evalapi",
+      "from": "edge",
+      "to": "evalapi",
+      "label": "/evaluate",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        70,
+        246
+      ]
     },
     {
       "id": "ingest-postgres",
@@ -415,7 +442,8 @@
       "items": [
         "S3: uploads, pages, results/{job}/pages/{idx}/…",
         "Redis: rate, concurrency, 10 s windows, breaker",
-        "A deep slow queue throttles the fast stage"
+        "A deep slow queue throttles the fast stage",
+        "POST /evaluate: stateless eval-api, no DB or queue"
       ]
     }
   ]

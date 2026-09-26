@@ -1,8 +1,8 @@
 {
   "info": {
-    "_postman_id": "aa6f8cc4-cc52-41c8-837f-7317f464cc91",
+    "_postman_id": "2b50d2e0-7e15-4194-b333-36ce1271bc69",
     "name": "VisionForge",
-    "description": "Upload a document, poll its status and fetch its page results.\n\nRun the requests in order: *post_job* saves `jobId` for the other two. To run all three in one go, use the Collection Runner: *get_jobs* then polls until the job finishes.\n\nAll requests go through the edge (`baseUrl`, default `http://localhost:8080`) and need `X-Client-ID` (`clientId`).",
+    "description": "Upload a document, poll its status, fetch its page results, and score results against ground truth.\n\nRun the requests in order: *post_job* saves `jobId` for the next two, and *get_job_results* saves the first page's tree as `pageTree` for *evaluate_job_page*. *evaluate* is self-contained. To run everything in one go, use the Collection Runner: *get_jobs* then polls until the job finishes.\n\nAll requests go through the edge (`baseUrl`, default `http://localhost:8080`). The job requests need `X-Client-ID` (`clientId`); `/evaluate` doesn't.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "item": [
@@ -130,6 +130,11 @@
               "});",
               "if (res.status === \"COMPLETE\") {",
               "    pm.test(\"a complete job lists every page\", () => pm.expect(res.pages.length).to.eql(res.total_pages));",
+              "}",
+              "",
+              "// Save the first page's tree for evaluate_job_page.",
+              "if (res.pages.length) {",
+              "    pm.collectionVariables.set(\"pageTree\", JSON.stringify(res.pages[0].result.tree));",
               "}"
             ]
           }
@@ -158,6 +163,125 @@
         "description": "Every finished page of the job, in document order. These are the same payloads as the stream's page events.\n\n**Response** `200`:\n```\n{job_id, status, total_pages,\n pages: [{page_index, state: \"COMPLETED\" | \"FAILED\", source: \"vlm\" | \"layout_fallback\" | \"none\",\n          low_confidence, result: {page_index, source, confidence, low_confidence, tree, text,\n                                   tables_markdown, key_values, error}}]}\n```\nWhile the job is still running, only the pages finished so far are listed. `404` if the job doesn't exist or belongs to another X-Client-ID."
       },
       "response": []
+    },
+    {
+      "name": "evaluate",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "const r = pm.response.json();",
+              "pm.test(\"text: 1 wrong character, 1 wrong word\", () => {",
+              "    pm.expect(r.text.char_edits).to.eql(1);",
+              "    pm.expect(r.text.cer).to.be.closeTo(1 / 29, 1e-9);",
+              "    pm.expect(r.text.word_edits).to.eql(1);",
+              "    pm.expect(r.text.wer).to.be.closeTo(1 / 5, 1e-9);",
+              "});",
+              "pm.test(\"boxes: both matched, the title box slightly off, one type wrong\", () => {",
+              "    pm.expect(r.bbox.matches_at_threshold).to.eql(2);",
+              "    pm.expect(r.bbox.mean_iou).to.be.closeTo((6000 / 6600 + 1) / 2, 1e-9);",
+              "    pm.expect(r.bbox.f1).to.eql(1);",
+              "    pm.expect(r.bbox.type_accuracy).to.eql(0.5);",
+              "});",
+              "pm.test(\"tree: one relabel (paragraph vs table)\", () => pm.expect(r.tree.ted).to.eql(1));",
+              "pm.test(\"tree diff under 100 ms\", () => pm.expect(r.timings_ms.tree).to.be.below(100));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"predicted\": {\n    \"type\": \"page\",\n    \"children\": [\n      {\n        \"type\": \"title\",\n        \"order\": 0,\n        \"text\": \"Invoice 2026\",\n        \"bbox\": {\n          \"x\": 50,\n          \"y\": 40,\n          \"w\": 300,\n          \"h\": 20\n        }\n      },\n      {\n        \"type\": \"paragraph\",\n        \"order\": 1,\n        \"text\": \"Total amount due\",\n        \"bbox\": {\n          \"x\": 50,\n          \"y\": 80,\n          \"w\": 400,\n          \"h\": 14\n        }\n      }\n    ]\n  },\n  \"ground_truth\": {\n    \"type\": \"page\",\n    \"children\": [\n      {\n        \"type\": \"title\",\n        \"order\": 0,\n        \"text\": \"Invoice 2025\",\n        \"bbox\": {\n          \"x\": 50,\n          \"y\": 40,\n          \"w\": 300,\n          \"h\": 22\n        }\n      },\n      {\n        \"type\": \"table\",\n        \"order\": 1,\n        \"text\": \"Total amount due\",\n        \"bbox\": {\n          \"x\": 50,\n          \"y\": 80,\n          \"w\": 400,\n          \"h\": 14\n        }\n      }\n    ]\n  },\n  \"iou_threshold\": 0.5\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/evaluate",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "evaluate"
+          ]
+        },
+        "description": "Score a predicted document tree against a ground-truth tree. Stateless; no `X-Client-ID` needed.\n\n**Body**\n```\n{\"predicted\": <tree>, \"ground_truth\": <tree>, \"iou_threshold\": 0.5}\n```\nA tree is the pipeline's output schema (`DocNode`): `{type, text?, bbox?: {x, y, w, h}, order?, children?: [...]}`. Pass a page result's `tree`, or a `document` root whose children are `page` nodes.\n\n**Response** `200`\n- `text`: `cer`, `wer` and the raw edit counts (reading-order Levenshtein, divided by the ground truth's length)\n- `bbox`: `mean_iou` (missed boxes count as 0), `matched_mean_iou`, `precision` / `recall` / `f1` at the threshold, `type_accuracy`\n- `tree`: `ted` (Zhang\u2013Shasha on node types), `ted_normalized`, node counts\n- `timings_ms` for each metric\n\n`422`: invalid tree, a tree over 1,000 nodes, or a comparison over the work budget. `429`: over 20 requests/s per IP (burst 40).\n\nThis sample has one wrong character in the title, a slightly taller title box, and a `paragraph` that should be a `table`. The tests check the exact expected scores."
+      },
+      "response": []
+    },
+    {
+      "name": "evaluate_job_page",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (!pm.collectionVariables.get(\"pageTree\")) {",
+              "    throw new Error(\"Run post_job, get_jobs and get_job_results first: get_job_results saves the page tree as {{pageTree}}.\");",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "const r = pm.response.json();",
+              "pm.test(\"returns all three metric groups\", () => {",
+              "    pm.expect(r).to.include.keys(\"text\", \"bbox\", \"tree\", \"timings_ms\");",
+              "    pm.expect(r.text.cer).to.be.at.least(0);",
+              "    pm.expect(r.tree.ted).to.be.at.least(0);",
+              "});",
+              "pm.test(\"tree diff under 100 ms\", () => pm.expect(r.timings_ms.tree).to.be.below(100));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"predicted\": {{pageTree}},\n  \"ground_truth\": {{pageTree}},\n  \"iou_threshold\": 0.5\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "{{baseUrl}}/evaluate",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "evaluate"
+          ]
+        },
+        "description": "Score the first page of your uploaded job. *get_job_results* saves that page's tree as `{{pageTree}}`.\n\nAs written, it compares the page with itself (a perfect score), which checks the wiring. To measure real accuracy, replace `\"ground_truth\": {{pageTree}}` with your labeled ground-truth tree for that page."
+      },
+      "response": []
     }
   ],
   "variable": [
@@ -176,6 +300,10 @@
     {
       "key": "polls",
       "value": "0"
+    },
+    {
+      "key": "pageTree",
+      "value": ""
     }
   ]
 }
