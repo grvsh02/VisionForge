@@ -42,6 +42,9 @@ OUTBOX_OLDEST = Gauge("vf_outbox_oldest_seconds", "Age of the oldest unsent outb
 STREAM_SUBSCRIBERS = Gauge("vf_stream_subscribers", "Connected stream subscribers")
 STREAM_FRAMES = Counter("vf_stream_frames_total", "Frames sent", ["kind"])
 UPLOADS = Counter("vf_uploads_total", "Job submissions", ["outcome"])
+EVAL_SECONDS = Histogram("vf_eval_seconds", "Time to compute one /evaluate metric", ["metric"],
+                         buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1, 2.5))
+EVALUATIONS = Counter("vf_evaluations_total", "/evaluate requests", ["outcome"])
 
 RSS = Gauge("vf_process_rss_bytes", "Resident set size of this process")
 
